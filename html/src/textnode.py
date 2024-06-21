@@ -23,7 +23,8 @@ class TextNode:
 
     def __repr__(self):
         return f"TextNode({self.text}, {self.text_type}, {self.url})"
-    
+
+
 def text_node_to_html_node(text_node):
     if text_node.text_type == text_type_text:
         return LeafNode(None, text_node.text)
