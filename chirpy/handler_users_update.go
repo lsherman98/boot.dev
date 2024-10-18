@@ -2,52 +2,63 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"strings"
 
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/lsherman98/boot.dev/chirpy/internal/auth"
+	"github.com/lsherman98/boot.dev/chirpy/internal/database"
 )
 
 func (cfg *apiConfig) handlerUsersUpdate(w http.ResponseWriter, r *http.Request) {
-    type parameters struct {
-        Password string `json:"password"`
-        Email string `json:"email"`
-    }
+	type parameters struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+	type response struct {
+		User
+	}
 
-    decoder := json.NewDecoder(r.Body)
-    params := parameters{}
-    err := decoder.Decode(&params)
-    if err != nil {
-        respondWithError(w, http.StatusInternalServerError, "Couldn't decode parameters")
-        return 
-    }
-
-    authorizationHeader := r.Header.Get("Authorization")
-    if authorizationHeader == "" {
-        respondWithError(w, http.StatusUnauthorized, "Authorization header missing")
-        return
-    }
-    tokenString := strings.TrimPrefix(authorizationHeader, "Bearer ")
-    claims := &jwt.RegisteredClaims{}
-    token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
-        return []byte(cfg.JwtSecret), nil
-    })
-    if err != nil || !token.Valid {
-        respondWithError(w, http.StatusUnauthorized, fmt.Sprintf("Invalid or expired token: %v", err),)
-        return
-    }
-
-    userId, _ := token.Claims.GetSubject()
-    user, err := cfg.DB.UpdateUser(params.Email, params.Password, userId)
+	token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't update user")
+		respondWithError(w, http.StatusUnauthorized, "Couldn't find JWT", err)
+		return
+	}
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Couldn't validate JWT", err)
 		return
 	}
 
-    respondWithJSON(w, http.StatusOK, User{
-		ID:   user.ID,
-		Email: user.Email,
-        IsChirpyRed: user.IsChirpyRed,
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't decode parameters", err)
+		return
+	}
+
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't hash password", err)
+		return
+	}
+
+	user, err := cfg.db.UpdateUser(r.Context(), database.UpdateUserParams{
+		ID:             userID,
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't update user", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, response{
+		User: User{
+			ID:          user.ID,
+			CreatedAt:   user.CreatedAt,
+			UpdatedAt:   user.UpdatedAt,
+			Email:       user.Email,
+			IsChirpyRed: user.IsChirpyRed,
+		},
 	})
 }

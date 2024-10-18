@@ -2,70 +2,79 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/lsherman98/boot.dev/chirpy/internal/auth"
+	"github.com/lsherman98/boot.dev/chirpy/internal/database"
 )
 
 func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
-		Password         string `json:"password"`
-		Email            string `json:"email"`
-		ExpiresInSeconds int    `json:"expires_in_seconds"`
+		Password string `json:"password"`
+		Email    string `json:"email"`
 	}
-
-	type loginResponse struct {
-		ID    int    `json:"id"`
-		Email string `json:"email"`
-		Token string `json:"token"`
-        RefreshToken string `json:"refresh_token"`
-		IsChirpyRed bool   `json:"is_chirpy_red"`
+	type response struct {
+		User
+		Token        string `json:"token"`
+		RefreshToken string `json:"refresh_token"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
 	err := decoder.Decode(&params)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't decode parameters")
+		respondWithError(w, http.StatusInternalServerError, "Couldn't decode parameters", err)
 		return
 	}
 
-	user, err := cfg.DB.AuthenticateUser(params.Email, params.Password)
+	user, err := cfg.db.GetUserByEmail(r.Context(), params.Email)
 	if err != nil {
-		respondWithError(w, http.StatusUnauthorized, "Login failed")
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password", err)
 		return
 	}
 
-    refreshToken, err := cfg.DB.GenerateRefreshToken(user.ID)
-    if err != nil {
-        respondWithError(w, http.StatusInternalServerError, fmt.Sprintf("%v", err))
-        return
-    }
-
-	secondsInHour := 3600
-	expirationTime := time.Now().Add(time.Second * time.Duration(secondsInHour))
-	claims := jwt.RegisteredClaims{
-        Issuer: "chirpy", 
-        IssuedAt: jwt.NewNumericDate(time.Now()), 
-        ExpiresAt: jwt.NewNumericDate(expirationTime),
-        Subject: strconv.Itoa(user.ID),
-    }
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signedToken, err := token.SignedString([]byte(cfg.JwtSecret))
+	err = auth.CheckPasswordHash(params.Password, user.HashedPassword)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, fmt.Sprintf("%v", err))
+		respondWithError(w, http.StatusUnauthorized, "Incorrect email or password", err)
 		return
 	}
 
-	respondWithJSON(w, http.StatusOK, loginResponse{
-		ID:    user.ID,
-		Email: user.Email,
-		Token: signedToken,
-        RefreshToken: refreshToken,
-		IsChirpyRed: user.IsChirpyRed,
+	accessToken, err := auth.MakeJWT(
+		user.ID,
+		cfg.jwtSecret,
+		time.Hour,
+	)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't create access JWT", err)
+		return
+	}
+
+	refreshToken, err := auth.MakeRefreshToken()
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't create refresh token", err)
+		return
+	}
+
+	_, err = cfg.db.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		UserID:    user.ID,
+		Token:     refreshToken,
+		ExpiresAt: time.Now().UTC().Add(time.Hour * 24 * 60),
+	})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't save refresh token", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, response{
+		User: User{
+			ID:          user.ID,
+			CreatedAt:   user.CreatedAt,
+			UpdatedAt:   user.UpdatedAt,
+			Email:       user.Email,
+			IsChirpyRed: user.IsChirpyRed,
+		},
+		Token:        accessToken,
+		RefreshToken: refreshToken,
 	})
 }

@@ -3,17 +3,21 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+	"github.com/lsherman98/boot.dev/chirpy/internal/auth"
+	"github.com/lsherman98/boot.dev/chirpy/internal/database"
 )
 
 type Chirp struct {
-	ID       int    `json:"id"`
-	Body     string `json:"body"`
-	AuthorId int    `json:"author_id"`
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	UserID    uuid.UUID `json:"user_id"`
+	Body      string    `json:"body"`
 }
 
 func (cfg *apiConfig) handlerChirpsCreate(w http.ResponseWriter, r *http.Request) {
@@ -21,48 +25,46 @@ func (cfg *apiConfig) handlerChirpsCreate(w http.ResponseWriter, r *http.Request
 		Body string `json:"body"`
 	}
 
-	decoder := json.NewDecoder(r.Body)
-	params := parameters{}
-	err := decoder.Decode(&params)
+	token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't decode parameters")
+		respondWithError(w, http.StatusUnauthorized, "Couldn't find JWT", err)
+		return
+	}
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Couldn't validate JWT", err)
 		return
 	}
 
-	authorizationHeader := r.Header.Get("Authorization")
-	if authorizationHeader == "" {
-		respondWithError(w, http.StatusUnauthorized, "Authorization header missing")
-		return
-	}
-	tokenString := strings.TrimPrefix(authorizationHeader, "Bearer ")
-	claims := &jwt.RegisteredClaims{}
-	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
-		return []byte(cfg.JwtSecret), nil
-	})
-	if err != nil || !token.Valid {
-		respondWithError(w, http.StatusUnauthorized, fmt.Sprintf("Invalid or expired token: %v", err))
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't decode parameters", err)
 		return
 	}
 
 	cleaned, err := validateChirp(params.Body)
 	if err != nil {
-		respondWithError(w, http.StatusBadRequest, err.Error())
+		respondWithError(w, http.StatusBadRequest, err.Error(), err)
 		return
 	}
 
-	userId, _ := token.Claims.GetSubject()
-
-	chirp, err := cfg.DB.CreateChirp(cleaned, userId)
+	chirp, err := cfg.db.CreateChirp(r.Context(), database.CreateChirpParams{
+		UserID: userID,
+		Body:   cleaned,
+	})
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Couldn't create chirp")
+		respondWithError(w, http.StatusInternalServerError, "Couldn't create chirp", err)
 		return
 	}
 
 	respondWithJSON(w, http.StatusCreated, Chirp{
-		ID:   chirp.ID,
-		Body: chirp.Body,
-		AuthorId: chirp.AuthorId,
-
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		UserID:    chirp.UserID,
+		Body:      chirp.Body,
 	})
 }
 

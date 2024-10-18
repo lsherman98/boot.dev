@@ -1,40 +1,46 @@
 package main
 
 import (
-	"fmt"
 	"net/http"
-	"strconv"
-	"strings"
 
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/lsherman98/boot.dev/chirpy/internal/auth"
+	"github.com/google/uuid"
 )
 
-
-func (cfg *apiConfig) handlerChirpDelete(w http.ResponseWriter, r *http.Request) {
-    chirpId, _ := strconv.Atoi(r.PathValue("chirpID"))
-
-
-	authorizationHeader := r.Header.Get("Authorization")
-	if authorizationHeader == "" {
-		respondWithError(w, http.StatusUnauthorized, "Authorization header missing")
-		return
-	}
-	tokenString := strings.TrimPrefix(authorizationHeader, "Bearer ")
-	claims := &jwt.RegisteredClaims{}
-	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
-		return []byte(cfg.JwtSecret), nil
-	})
-	if err != nil || !token.Valid {
-		respondWithError(w, http.StatusUnauthorized, fmt.Sprintf("Invalid or expired token: %v", err))
-		return
-	}
-	userId, _ := token.Claims.GetSubject()
-
-	err = cfg.DB.DeleteChirp(chirpId, userId)
+func (cfg *apiConfig) handlerChirpsDelete(w http.ResponseWriter, r *http.Request) {
+	chirpIDString := r.PathValue("chirpID")
+	chirpID, err := uuid.Parse(chirpIDString)
 	if err != nil {
-		respondWithError(w, http.StatusForbidden, "Couldn't delete chirp")
+		respondWithError(w, http.StatusBadRequest, "Invalid chirp ID", err)
 		return
 	}
-    w.WriteHeader(http.StatusNoContent)
 
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Couldn't find JWT", err)
+		return
+	}
+	userID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Couldn't validate JWT", err)
+		return
+	}
+
+	dbChirp, err := cfg.db.GetChirp(r.Context(), chirpID)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "Couldn't get chirp", err)
+		return
+	}
+	if dbChirp.UserID != userID {
+		respondWithError(w, http.StatusForbidden, "You can't delete this chirp", err)
+		return
+	}
+
+	err = cfg.db.DeleteChirp(r.Context(), chirpID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't delete chirp", err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
